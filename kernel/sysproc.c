@@ -96,7 +96,7 @@ uint64
 sys_trace(void)
 {
   int mask;
-  argint(0, &mask);          // Lấy đối số đầu tiên từ user
+  argint(0, &mask);             // Lấy đối số đầu tiên từ user
   myproc()->tracemask = mask;   // Lưu mask vào struct proc
   return 0;
 }

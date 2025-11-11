@@ -155,6 +155,32 @@ static char *syscall_names[] = {
 [SYS_trace] "trace"
 };
 
+static char *syscall_names[] = {
+[SYS_fork]  "fork",
+[SYS_exit]  "exit",
+[SYS_wait]  "wait",
+[SYS_pipe]  "pipe",
+[SYS_read]  "read",
+[SYS_kill]  "kill",
+[SYS_exec]  "exec",
+[SYS_fstat] "fstat",
+[SYS_chdir] "chdir",
+[SYS_dup]   "dup",
+[SYS_getpid]"getpid",
+[SYS_sbrk]  "sbrk",
+[SYS_sleep] "sleep",
+[SYS_uptime]"uptime",
+[SYS_open]  "open",
+[SYS_write] "write",
+[SYS_mknod] "mknod",
+[SYS_unlink]"unlink",
+[SYS_link]  "link",
+[SYS_mkdir] "mkdir",
+[SYS_close] "close",
+[SYS_trace] "trace",
+};
+
+
 void
 syscall(void)
 {
@@ -163,11 +189,16 @@ syscall(void)
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    // Remember the current tracemask before invoking the syscall.
+    // This avoids tracing the trace syscall itself when it updates the mask
+    // and prevents immediate recursive/duplicate tracing caused by that.
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
-    p->trapframe->a0 = syscalls[num]();
+    p->trapframe->a0 = syscalls[num](); //Gọi syscall tương ứng với num
+
+    // Use the old mask (pre-syscall) to decide whether to print.
     if (p->tracemask & (1 << num)) {
-      printf("%d: syscall %s -> %ld\n", p->pid,    syscall_names[num], p->trapframe->a0);
+      printf("%d: syscall %s -> %ld\n", p->pid, syscall_names[num], p->trapframe->a0);
     }
   } else {
     printf("%d %s: unknown sys call %d\n",
