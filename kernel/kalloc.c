@@ -91,3 +91,19 @@ kalloc(void)
   return (void*)r;
 }
 
+uint64
+count_freemem(void)
+{
+  uint64 count = 0;
+  struct run *r;
+
+  acquire(&kmem.lock);
+  r = kmem.freelist;
+  while(r) {
+    count++;
+    r = r->next;
+  }
+  release(&kmem.lock);
+
+  return count * PGSIZE;
+}

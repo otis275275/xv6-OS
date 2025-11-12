@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -101,3 +102,23 @@ sys_trace(void)
   return 0;
 }
 
+uint64
+sys_sysinfo(void)
+{
+  uint64 addr; // Địa chỉ của struct sysinfo bên user-space
+  struct sysinfo info; // Struct tạm bên trong kernel
+
+  // 1. Lấy tham số (con trỏ) từ user
+  argaddr(0, &addr);
+
+  // 2. Điền thông tin vào struct tạm
+  info.freemem = count_freemem();
+  info.nproc = count_procs();
+
+  // 3. Sao chép struct từ kernel-space ra user-space
+  if(copyout(myproc()->pagetable, addr, (char *)&info, sizeof(info)) < 0) {
+    return -1;
+  }
+
+  return 0; // Thành công
+}

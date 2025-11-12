@@ -196,7 +196,8 @@ UPROGS=\
 	$U/_zombie\
 	$U/_pingpong\
 	$U/_trace\
-
+	$U/_primes\
+	$U/_sysinfotest\
 
 
 
