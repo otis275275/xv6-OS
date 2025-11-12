@@ -195,8 +195,10 @@ UPROGS=\
 	$U/_wc\
 	$U/_zombie\
 	$U/_pingpong\
-	$U/_trace\
 	$U/_primes\
+	$U/_find\
+	$U/_xargs\
+	$U/_trace\
 	$U/_sysinfotest\
 
 
