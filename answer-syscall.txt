@@ -1,0 +1,20 @@
+1. Nhìn vào output khi backtrace,  hàm nào đang gọi syscall?
+	-> usertrap()
+
+2. Giá trị của p->trapframe->a7 là bao nhiêu và giá trị đó đại diện cho điều gì?
+	-> 7 
+	-> Giá trị này đại diện cho số của lời gọi hệ thống (System Call Number) mà tiến trình người dùng đang yêu cầu. Giá trị 7 tương ứng với lời gọi hệ thống exec SYS_exec (lệnh thực thi chương trình).
+
+3. Chế độ trước đó mà CPU đã ở là gì?
+	->  User mode (Chế độ người dùng)
+
+4. Viết ra lệnh assembly mà kernel đang bị panic tại đó. Thanh ghi nào tương ứng với biến num? 
+	->  80001c82:	00002683          	lw	a3,0(zero)
+	-> num chính là thanh ghi đích của lệnh Load, ở đây là a3
+
+5. Tại sao kernel bị crash?
+	-> Kernel bị crash vì câu lệnh num = * (int *) 0; cố gắng đọc từ địa chỉ bộ nhớ 0x0. Theo thiết kế bảo mật của xv6, địa chỉ 0x0 (trang 0) không được ánh xạ (unmapped) trong không gian địa chỉ kernel để bắt lỗi con trỏ null. Điều này được xác định bởi scause = 13 (Load Page Fault).
+
+6. Tên của binary (chương trình) đang chạy khi kernel bị panic là gì? ID tiến trình (pid) của nó là bao nhiêu?
+	-> initcode
+	-> pid = 1

@@ -1,0 +1,1427 @@
+diff --git a/Makefile b/Makefile
+index 74e454f..140b787 100644
+--- a/Makefile
++++ b/Makefile
+@@ -194,6 +194,12 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
++	$U/_pingpong\
++	$U/_primes\
++	$U/_find\
++	$U/_xargs\
++	$U/_trace\
++	$U/_sysinfotest\
+ 
+ 
+ 
+diff --git a/README b/README
+index 5a5d695..8f7f7b1 100644
+--- a/README
++++ b/README
+@@ -31,9 +31,6 @@ Rafael Ubal, Amane Uehara, Pablo Ventura, Xi Wang, WaheedHafez,
+ Keiichi Watanabe, Lucas Wolf, Nicolas Wolovick, wxdao, Grant Wu, x653,
+ Jindong Zhang, Icenowy Zheng, ZhUyU1997, and Zou Chang Wei.
+ 
+-The code in the files that constitute xv6 is
+-Copyright 2006-2024 Frans Kaashoek, Robert Morris, and Russ Cox.
+-
+ ERROR REPORTS
+ 
+ Please send errors and suggestions to Frans Kaashoek and Robert Morris
+@@ -46,4 +43,4 @@ BUILDING AND RUNNING XV6
+ You will need a RISC-V "newlib" tool chain from
+ https://github.com/riscv/riscv-gnu-toolchain, and qemu compiled for
+ riscv64-softmmu.  Once they are installed, and in your shell
+-search path, you can run "make qemu".
++search path, you can run "make qemu".
+\ No newline at end of file
+diff --git a/grade-lab-syscall b/grade-lab-syscall
+new file mode 100755
+index 0000000..928369e
+--- /dev/null
++++ b/grade-lab-syscall
+@@ -0,0 +1,82 @@
++#!/usr/bin/env python3
++
++import re
++from gradelib import *
++
++r = Runner(save("xv6.out"))
++
++@test(5, "answers-syscall.txt")
++def test_answers():
++    # just a simple sanity check, will be graded manually
++    check_answers("answers-syscall.txt")
++
++@test(5, "trace 32 grep")
++def test_trace_32_grep():
++    r.run_qemu(shell_script([
++        'trace 32 grep hello README'
++    ]))
++    r.match('^\\d+: syscall read -> \\d+')
++    r.match('^\\d+: syscall read -> \\d+')
++    r.match('^\\d+: syscall read -> \\d+')
++    r.match('^\\d+: syscall read -> 0')
++
++@test(5, "trace close grep")
++def test_trace_close_grep():
++    r.run_qemu(shell_script(['trace 2097152 grep hello README']))
++    r.match('^\\d+: syscall close -> 0')
++    r.match(no=[".* syscall read .*"])
++
++@test(5, "trace exec + open grep")
++def test_trace_exec_open_grep():
++    r.run_qemu(shell_script(['trace 32896 grep hello README']))
++    r.match('^\\d+: syscall exec -> 3')
++    r.match('^\\d+: syscall open -> 3')
++    r.match(no=[".* syscall read .*"])
++
++@test(5, "trace all grep")
++def test_trace_all_grep():
++    r.run_qemu(shell_script([
++        'trace 2147483647 grep hello README'
++    ]))
++    r.match('^\\d+: syscall trace -> 0')
++    r.match('^\\d+: syscall exec -> 3')
++    r.match('^\\d+: syscall open -> 3')
++    r.match('^\\d+: syscall read -> \\d+')
++    r.match('^\\d+: syscall read -> \\d+')
++    r.match('^\\d+: syscall read -> \\d+')
++    r.match('^\\d+: syscall read -> 0')
++    r.match('^\\d+: syscall close -> 0')
++
++@test(5, "trace nothing")
++def test_trace_nothing():
++    r.run_qemu(shell_script([
++        'grep hello README'
++    ]))
++    r.match(no=[".* syscall .*"])
++
++@test(5, "trace children")
++def test_trace_children():
++    r.run_qemu(shell_script([
++        'trace 2 usertests forkforkfork'
++    ]))
++    r.match('3: syscall fork -> 4')
++    r.match('^5: syscall fork -> \\d+')
++    r.match('^6: syscall fork -> \\d+')
++    r.match('^\\d+: syscall fork -> -1')
++    r.match('^OK')
++
++@test(14, "attack")
++def test_attack():
++    r.run_qemu(shell_script([
++        'attacktest'
++    ]))
++    r.match('^OK: secret is')
++
++@test(1, "time")
++def test_time():
++    check_time()
++
++run_tests()
++
++
++
+diff --git a/kernel/defs.h b/kernel/defs.h
+index d1b6bb9..d80dc1e 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -63,6 +63,7 @@ void            ramdiskrw(struct buf*);
+ void*           kalloc(void);
+ void            kfree(void *);
+ void            kinit(void);
++uint64          count_freemem(void);
+ 
+ // log.c
+ void            initlog(int, struct superblock*);
+@@ -106,6 +107,7 @@ void            yield(void);
+ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+ void            procdump(void);
++int             count_procs(void);
+ 
+ // swtch.S
+ void            swtch(struct context*, struct context*);
+diff --git a/kernel/kalloc.c b/kernel/kalloc.c
+index 0699e7e..eddb160 100644
+--- a/kernel/kalloc.c
++++ b/kernel/kalloc.c
+@@ -30,13 +30,16 @@ kinit()
+   freerange(end, (void*)PHYSTOP);
+ }
+ 
++
++
+ void
+ freerange(void *pa_start, void *pa_end)
+ {
+   char *p;
+   p = (char*)PGROUNDUP((uint64)pa_start);
+-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
++  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+     kfree(p);
++  }
+ }
+ 
+ // Free the page of physical memory pointed at by pa,
+@@ -51,9 +54,12 @@ kfree(void *pa)
+   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+     panic("kfree");
+ 
++
++#ifndef LAB_SYSCALL
+   // Fill with junk to catch dangling refs.
+   memset(pa, 1, PGSIZE);
+-
++#endif
++  
+   r = (struct run*)pa;
+ 
+   acquire(&kmem.lock);
+@@ -62,6 +68,8 @@ kfree(void *pa)
+   release(&kmem.lock);
+ }
+ 
++
++
+ // Allocate one 4096-byte page of physical memory.
+ // Returns a pointer that the kernel can use.
+ // Returns 0 if the memory cannot be allocated.
+@@ -72,11 +80,30 @@ kalloc(void)
+ 
+   acquire(&kmem.lock);
+   r = kmem.freelist;
+-  if(r)
++  if(r) {
+     kmem.freelist = r->next;
++  }
+   release(&kmem.lock);
+-
++#ifndef LAB_SYSCALL
+   if(r)
+     memset((char*)r, 5, PGSIZE); // fill with junk
++#endif
+   return (void*)r;
+ }
++
++uint64
++count_freemem(void)
++{
++  uint64 count = 0;
++  struct run *r;
++
++  acquire(&kmem.lock);
++  r = kmem.freelist;
++  while(r) {
++    count++;
++    r = r->next;
++  }
++  release(&kmem.lock);
++
++  return count * PGSIZE;
++}
+\ No newline at end of file
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 130d9ce..7e576a5 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -295,6 +295,7 @@ fork(void)
+     return -1;
+   }
+   np->sz = p->sz;
++  np->tracemask = p->tracemask;
+ 
+   // copy saved user registers.
+   *(np->trapframe) = *(p->trapframe);
+@@ -693,3 +694,19 @@ procdump(void)
+     printf("\n");
+   }
+ }
++
++int
++count_procs(void)
++{
++  int count = 0;
++  struct proc *p;
++
++  for(p = proc; p < &proc[NPROC]; p++) {
++    acquire(&p->lock);
++    if(p->state != UNUSED) {
++      count++;
++    }
++    release(&p->lock);
++  }
++  return count;
++}
+\ No newline at end of file
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..c63c64b 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,5 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int tracemask; // Thêm ở đây
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index ed65409..b802559 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,8 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_trace(void);
++extern uint64 sys_sysinfo(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,8 +128,37 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_trace]   sys_trace,
++[SYS_sysinfo] sys_sysinfo,
+ };
+ 
++static char *syscall_names[] = {
++[SYS_fork] "fork",
++[SYS_exit] "exit",
++[SYS_wait] "wait",
++[SYS_pipe] "pipe",
++[SYS_read] "read",
++[SYS_kill] "kill",
++[SYS_exec] "exec",
++[SYS_fstat] "fstat",
++[SYS_chdir] "chdir",
++[SYS_dup] "dup",
++[SYS_getpid] "getpid",
++[SYS_sbrk] "sbrk",
++[SYS_sleep] "sleep",
++[SYS_uptime] "uptime",
++[SYS_open] "open",
++[SYS_write] "write",
++[SYS_mknod] "mknod",
++[SYS_unlink] "unlink",
++[SYS_link] "link",
++[SYS_mkdir] "mkdir",
++[SYS_close] "close",
++[SYS_trace] "trace",
++};
++
++
++
+ void
+ syscall(void)
+ {
+@@ -136,9 +167,17 @@ syscall(void)
+ 
+   num = p->trapframe->a7;
+   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
++    // Remember the current tracemask before invoking the syscall.
++    // This avoids tracing the trace syscall itself when it updates the mask
++    // and prevents immediate recursive/duplicate tracing caused by that.
+     // Use num to lookup the system call function for num, call it,
+     // and store its return value in p->trapframe->a0
+-    p->trapframe->a0 = syscalls[num]();
++    p->trapframe->a0 = syscalls[num](); //Gọi syscall tương ứng với num
++
++    // Use the old mask (pre-syscall) to decide whether to print.
++    if (p->tracemask & (1 << num)) {
++      printf("%d: syscall %s -> %ld\n", p->pid, syscall_names[num], p->trapframe->a0);
++    }
+   } else {
+     printf("%d %s: unknown sys call %d\n",
+             p->pid, p->name, num);
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index bc5f356..e153363 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_trace  22
++#define SYS_sysinfo 23
+\ No newline at end of file
+diff --git a/kernel/sysinfo.h b/kernel/sysinfo.h
+new file mode 100644
+index 0000000..fb878e6
+--- /dev/null
++++ b/kernel/sysinfo.h
+@@ -0,0 +1,4 @@
++struct sysinfo {
++  uint64 freemem;   // amount of free memory (bytes)
++  uint64 nproc;     // number of process
++};
+diff --git a/kernel/sysinfotest.c b/kernel/sysinfotest.c
+new file mode 100644
+index 0000000..a92d10a
+--- /dev/null
++++ b/kernel/sysinfotest.c
+@@ -0,0 +1,153 @@
++#include "kernel/types.h"
++#include "kernel/riscv.h"
++#include "kernel/sysinfo.h"
++#include "user/user.h"
++
++
++void
++sinfo(struct sysinfo *info) {
++  if (sysinfo(info) < 0) {
++    printf("FAIL: sysinfo failed");
++    exit(1);
++  }
++}
++
++//
++// use sbrk() to count how many free physical memory pages there are.
++//
++int
++countfree()
++{
++  uint64 sz0 = (uint64)sbrk(0);
++  struct sysinfo info;
++  int n = 0;
++
++  while(1){
++    if((uint64)sbrk(PGSIZE) == 0xffffffffffffffff){
++      break;
++    }
++    n += PGSIZE;
++  }
++  sinfo(&info);
++  if (info.freemem != 0) {
++    printf("FAIL: there is no free mem, but sysinfo.freemem=%ld\n",
++      info.freemem);
++    exit(1);
++  }
++  sbrk(-((uint64)sbrk(0) - sz0));
++  return n;
++}
++
++void
++testmem() {
++  struct sysinfo info;
++  uint64 n = countfree();
++  
++  sinfo(&info);
++
++  if (info.freemem!= n) {
++    printf("FAIL: free mem %ld (bytes) instead of %ld\n", info.freemem, n);
++    exit(1);
++  }
++  
++  if((uint64)sbrk(PGSIZE) == 0xffffffffffffffff){
++    printf("sbrk failed");
++    exit(1);
++  }
++
++  sinfo(&info);
++    
++  if (info.freemem != n-PGSIZE) {
++    printf("FAIL: free mem %ld (bytes) instead of %ld\n", n-PGSIZE, info.freemem);
++    exit(1);
++  }
++  
++  if((uint64)sbrk(-PGSIZE) == 0xffffffffffffffff){
++    printf("sbrk failed");
++    exit(1);
++  }
++
++  sinfo(&info);
++    
++  if (info.freemem != n) {
++    printf("FAIL: free mem %ld (bytes) instead of %ld\n", n, info.freemem);
++    exit(1);
++  }
++}
++
++void
++testcall() {
++  struct sysinfo info;
++  
++  if (sysinfo(&info) < 0) {
++    printf("FAIL: sysinfo failed\n");
++    exit(1);
++  }
++
++  if (sysinfo((struct sysinfo *) 0xeaeb0b5b00002f5e) !=  0xffffffffffffffff) {
++    printf("FAIL: sysinfo succeeded with bad argument\n");
++    exit(1);
++  }
++}
++
++void testproc() {
++  struct sysinfo info;
++  uint64 nproc;
++  int status;
++  int pid;
++  
++  sinfo(&info);
++  nproc = info.nproc;
++
++  pid = fork();
++  if(pid < 0){
++    printf("sysinfotest: fork failed\n");
++    exit(1);
++  }
++  if(pid == 0){
++    sinfo(&info);
++    if(info.nproc != nproc+1) {
++      printf("sysinfotest: FAIL nproc is %ld instead of %ld\n", info.nproc, nproc+1);
++      exit(1);
++    }
++    exit(0);
++  }
++  wait(&status);
++  sinfo(&info);
++  if(info.nproc != nproc) {
++      printf("sysinfotest: FAIL nproc is %ld instead of %ld\n", info.nproc, nproc);
++      exit(1);
++  }
++}
++
++void testbad() {
++  int pid = fork();
++  int xstatus;
++  
++  if(pid < 0){
++    printf("sysinfotest: fork failed\n");
++    exit(1);
++  }
++  if(pid == 0){
++      sinfo(0x0);
++      exit(0);
++  }
++  wait(&xstatus);
++  if(xstatus == -1)  // kernel killed child?
++    exit(0);
++  else {
++    printf("sysinfotest: testbad succeeded %d\n", xstatus);
++    exit(xstatus);
++  }
++}
++
++int
++main(int argc, char *argv[])
++{
++  printf("sysinfotest: start\n");
++  testcall();
++  testmem();
++  testproc();
++  printf("sysinfotest: OK\n");
++  exit(0);
++}
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 3b4d5bd..2fbe5c2 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -5,6 +5,7 @@
+ #include "memlayout.h"
+ #include "spinlock.h"
+ #include "proc.h"
++#include "sysinfo.h"
+ 
+ uint64
+ sys_exit(void)
+@@ -91,3 +92,33 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_trace(void)
++{
++  int mask;
++  argint(0, &mask);             // Lấy đối số đầu tiên từ user
++  myproc()->tracemask = mask;   // Lưu mask vào struct proc
++  return 0;
++}
++
++uint64
++sys_sysinfo(void)
++{
++  uint64 addr; // Địa chỉ của struct sysinfo bên user-space
++  struct sysinfo info; // Struct tạm bên trong kernel
++
++  // 1. Lấy tham số (con trỏ) từ user
++  argaddr(0, &addr);
++
++  // 2. Điền thông tin vào struct tạm
++  info.freemem = count_freemem();
++  info.nproc = count_procs();
++
++  // 3. Sao chép struct từ kernel-space ra user-space
++  if(copyout(myproc()->pagetable, addr, (char *)&info, sizeof(info)) < 0) {
++    return -1;
++  }
++
++  return 0; // Thành công
++}
+\ No newline at end of file
+diff --git a/kernel/vm.c b/kernel/vm.c
+index 62421a2..7f388fe 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -4,6 +4,8 @@
+ #include "elf.h"
+ #include "riscv.h"
+ #include "defs.h"
++#include "spinlock.h"
++#include "proc.h"
+ #include "fs.h"
+ 
+ /*
+@@ -30,6 +32,14 @@ kvmmake(void)
+   // virtio mmio disk interface
+   kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+ 
++#ifdef LAB_NET
++  // PCI-E ECAM (configuration space), for pci.c
++  kvmmap(kpgtbl, 0x30000000L, 0x30000000L, 0x10000000, PTE_R | PTE_W);
++
++  // pci.c maps the e1000's registers here.
++  kvmmap(kpgtbl, 0x40000000L, 0x40000000L, 0x20000, PTE_R | PTE_W);
++#endif  
++
+   // PLIC
+   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
+ 
+@@ -92,6 +102,11 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
+     pte_t *pte = &pagetable[PX(level, va)];
+     if(*pte & PTE_V) {
+       pagetable = (pagetable_t)PTE2PA(*pte);
++#ifdef LAB_PGTBL
++      if(PTE_LEAF(*pte)) {
++        return pte;
++      }
++#endif
+     } else {
+       if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+         return 0;
+@@ -125,6 +140,7 @@ walkaddr(pagetable_t pagetable, uint64 va)
+   return pa;
+ }
+ 
++
+ // add a mapping to the kernel page table.
+ // only used when booting.
+ // does not flush TLB or enable paging.
+@@ -179,15 +195,19 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+ {
+   uint64 a;
+   pte_t *pte;
++  int sz;
+ 
+   if((va % PGSIZE) != 0)
+     panic("uvmunmap: not aligned");
+ 
+-  for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
++  for(a = va; a < va + npages*PGSIZE; a += sz){
++    sz = PGSIZE;
+     if((pte = walk(pagetable, a, 0)) == 0)
+       panic("uvmunmap: walk");
+-    if((*pte & PTE_V) == 0)
++    if((*pte & PTE_V) == 0) {
++      printf("va=%ld pte=%ld\n", a, *pte);
+       panic("uvmunmap: not mapped");
++    }
+     if(PTE_FLAGS(*pte) == PTE_V)
+       panic("uvmunmap: not a leaf");
+     if(do_free){
+@@ -227,6 +247,7 @@ uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
+   memmove(mem, src, sz);
+ }
+ 
++
+ // Allocate PTEs and physical memory to grow process from oldsz to
+ // newsz, which need not be page aligned.  Returns new size or 0 on error.
+ uint64
+@@ -234,19 +255,23 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
+ {
+   char *mem;
+   uint64 a;
++  int sz;
+ 
+   if(newsz < oldsz)
+     return oldsz;
+ 
+   oldsz = PGROUNDUP(oldsz);
+-  for(a = oldsz; a < newsz; a += PGSIZE){
++  for(a = oldsz; a < newsz; a += sz){
++    sz = PGSIZE;
+     mem = kalloc();
+     if(mem == 0){
+       uvmdealloc(pagetable, a, oldsz);
+       return 0;
+     }
+-    memset(mem, 0, PGSIZE);
+-    if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
++#ifndef LAB_SYSCALL
++    memset(mem, 0, sz);
++#endif
++    if(mappages(pagetable, a, sz, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
+       kfree(mem);
+       uvmdealloc(pagetable, a, oldsz);
+       return 0;
+@@ -316,8 +341,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+   uint64 pa, i;
+   uint flags;
+   char *mem;
++  int szinc;
+ 
+-  for(i = 0; i < sz; i += PGSIZE){
++  for(i = 0; i < sz; i += szinc){
++    szinc = PGSIZE;
++    szinc = PGSIZE;
+     if((pte = walk(old, i, 0)) == 0)
+       panic("uvmcopy: pte should exist");
+     if((*pte & PTE_V) == 0)
+@@ -363,13 +391,21 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
+ 
+   while(len > 0){
+     va0 = PGROUNDDOWN(dstva);
+-    if(va0 >= MAXVA)
++    if (va0 >= MAXVA)
++      return -1;
++    if((pte = walk(pagetable, va0, 0)) == 0) {
++      // printf("copyout: pte should exist 0x%x %d\n", dstva, len);
++      return -1;
++    }
++
++
++    // forbid copyout over read-only user text pages.
++    if((*pte & PTE_W) == 0)
+       return -1;
+-    pte = walk(pagetable, va0, 0);
+-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
+-       (*pte & PTE_W) == 0)
++    
++    pa0 = walkaddr(pagetable, va0);
++    if(pa0 == 0)
+       return -1;
+-    pa0 = PTE2PA(*pte);
+     n = PGSIZE - (dstva - va0);
+     if(n > len)
+       n = len;
+@@ -389,7 +425,7 @@ int
+ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
+ {
+   uint64 n, va0, pa0;
+-
++  
+   while(len > 0){
+     va0 = PGROUNDDOWN(srcva);
+     pa0 = walkaddr(pagetable, va0);
+@@ -449,3 +485,20 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
+     return -1;
+   }
+ }
++
++
++#ifdef LAB_PGTBL
++void
++vmprint(pagetable_t pagetable) {
++  // your code here
++}
++#endif
++
++
++
++#ifdef LAB_PGTBL
++pte_t*
++pgpte(pagetable_t pagetable, uint64 va) {
++  return walk(pagetable, va, 0);
++}
++#endif
+diff --git a/user/attack.c b/user/attack.c
+new file mode 100644
+index 0000000..928e7d0
+--- /dev/null
++++ b/user/attack.c
+@@ -0,0 +1,13 @@
++#include "kernel/types.h"
++#include "kernel/fcntl.h"
++#include "user/user.h"
++#include "kernel/riscv.h"
++
++int
++main(int argc, char *argv[])
++{
++  // your code here.  you should write the secret to fd 2 using write
++  // (e.g., write(2, secret, 8)
++
++  exit(1);
++}
+diff --git a/user/attacktest.c b/user/attacktest.c
+new file mode 100644
+index 0000000..6853b62
+--- /dev/null
++++ b/user/attacktest.c
+@@ -0,0 +1,107 @@
++#include "kernel/types.h"
++#include "kernel/fcntl.h"
++#include "user/user.h"
++#include "kernel/riscv.h"
++
++char secret[8];
++char output[64];
++
++// from FreeBSD.
++int
++do_rand(unsigned long *ctx)
++{
++/*
++ * Compute x = (7^5 * x) mod (2^31 - 1)
++ * without overflowing 31 bits:
++ *      (2^31 - 1) = 127773 * (7^5) + 2836
++ * From "Random number generators: good ones are hard to find",
++ * Park and Miller, Communications of the ACM, vol. 31, no. 10,
++ * October 1988, p. 1195.
++ */
++    long hi, lo, x;
++
++    /* Transform to [1, 0x7ffffffe] range. */
++    x = (*ctx % 0x7ffffffe) + 1;
++    hi = x / 127773;
++    lo = x % 127773;
++    x = 16807 * lo - 2836 * hi;
++    if (x < 0)
++        x += 0x7fffffff;
++    /* Transform to [0, 0x7ffffffd] range. */
++    x--;
++    *ctx = x;
++    return (x);
++}
++
++unsigned long rand_next = 1;
++
++int
++rand(void)
++{
++    return (do_rand(&rand_next));
++}
++
++// generate a random string of the indicated length.
++char *
++randstring(char *buf, int n)
++{
++  for(int i = 0; i < n-1; i++) {
++    buf[i] = "./abcdef"[(rand() >> 7) % 8];
++  }
++  if(n > 0)
++    buf[n-1] = '\0';
++  return buf;
++}
++
++int
++main(int argc, char *argv[])
++{
++  int pid;
++  int fds[2];
++
++  // an insecure way of generating a random string, because xv6
++  // doesn't have good source of randomness.
++  rand_next = uptime();
++  randstring(secret, 8);
++  
++  if((pid = fork()) < 0) {
++    printf("fork failed\n");
++    exit(1);   
++  }
++  if(pid == 0) {
++    char *newargv[] = { "secret", secret, 0 };
++    exec(newargv[0], newargv);
++    printf("exec %s failed\n", newargv[0]);
++    exit(1);
++  } else {
++    wait(0);  // wait for secret to exit
++    if(pipe(fds) < 0) {
++      printf("pipe failed\n");
++      exit(1);   
++    }
++    if((pid = fork()) < 0) {
++      printf("fork failed\n");
++      exit(1);   
++    }
++    if(pid == 0) {
++      close(fds[0]);
++      close(2);
++      dup(fds[1]);
++      char *newargv[] = { "attack", 0 };
++      exec(newargv[0], newargv);
++      printf("exec %s failed\n", newargv[0]);
++      exit(1);
++    } else {
++       close(fds[1]);
++      if(read(fds[0], output, 64) < 0) {
++        printf("FAIL; read failed; no secret\n");
++        exit(1);
++      }
++      if(strcmp(secret, output) == 0) {
++        printf("OK: secret is %s\n", output);
++      } else {
++        printf("FAIL: no/incorrect secret\n");
++      }
++    }
++  }
++}
+diff --git a/user/find.c b/user/find.c
+new file mode 100644
+index 0000000..c2ec5bf
+--- /dev/null
++++ b/user/find.c
+@@ -0,0 +1,72 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++#include "kernel/fs.h"
++
++void find(char *path, char *filename) {
++  char buf[512], *p; // buffer to build full path
++  int fd; // file descriptor for the current directory
++  struct dirent de; // to store directory entries (files/subfolders)
++  struct stat st; // to store file info (type, size, etc.)
++
++  // open directory
++  if ((fd = open(path, 0)) < 0) {
++    fprintf(2, "find: cannot open %s\n", path);
++    return;
++  }
++
++  // get info about the file/directory
++  if (fstat(fd, &st) < 0) {
++    fprintf(2, "find: cannot stat %s\n", path);
++    close(fd);
++    return;
++  }
++
++  // if it is FILE -> STOP
++  if (st.type == T_FILE) {
++    close(fd);
++    return;
++  }
++
++  // check if the new full path (current path + "/" + filename) will fit in the buffer
++  if (strlen(path) + 1 + DIRSIZ + 1 > sizeof(buf)) {
++    printf("find: path too long\n");
++    close(fd);
++    return;
++  }
++
++  // copy the current path into the buffer
++  strcpy(buf, path);
++  p = buf + strlen(buf); // move pointer 'p' to the end of the path
++  *p++ = '/';
++
++  while (read(fd, &de, sizeof(de)) == sizeof(de)) {
++    if (de.inum == 0) // empty entry
++      continue;
++
++    if (strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0) 
++      continue; // skip "." and ".." to avoid infinite recursion
++
++    memmove(p, de.name, DIRSIZ);
++    p[DIRSIZ] = 0;
++
++    if (stat(buf, &st) < 0)
++      continue;
++
++    // if it's a file and the name matches -> print the full path
++    if (st.type == T_FILE && strcmp(de.name, filename) == 0)
++      printf("%s\n", buf);
++    else if (st.type == T_DIR)
++      find(buf, filename);
++  }
++  close(fd);
++}
++
++int main(int argc, char *argv[]) {
++  if (argc != 3) {
++    fprintf(2, "Usage: find <path> <filename>\n");
++    exit(1);
++  }
++  find(argv[1], argv[2]);
++  exit(0);
++}
+diff --git a/user/pingpong.c b/user/pingpong.c
+new file mode 100644
+index 0000000..9e70025
+--- /dev/null
++++ b/user/pingpong.c
+@@ -0,0 +1,46 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main(void) {
++    //p1: cha sang con
++    //p2: con sang cha
++    int p1[2], p2[2];
++    char buf[1];
++
++    pipe(p1);
++    pipe(p2);
++
++    int pid = fork();
++
++    if (pid == 0) {  // Tiến trình con
++        close(p1[1]); // đóng đầu ghi của p1
++        close(p2[0]); // đóng đầu đọc của p2
++
++        read(p1[0], buf, 1);
++        printf("%d: received ping\n", getpid());
++
++        write(p2[1], buf, 1);
++
++        close(p1[0]);
++        close(p2[1]);
++        exit(0);
++
++    } else if (pid > 0) {  // Tiến trình cha
++        close(p1[0]); // đóng đầu đọc của p1
++        close(p2[1]); // đóng đầu ghi của p2
++
++        char byte = 'x';
++        write(p1[1], &byte, 1);
++
++        read(p2[0], buf, 1);
++        printf("%d: received pong\n", getpid());
++
++        close(p1[1]);
++        close(p2[0]);
++        exit(0);
++    } else {
++        fprintf(2, "Fork failed\n");
++        exit(1);
++    }
++}
+diff --git a/user/primes.c b/user/primes.c
+new file mode 100644
+index 0000000..6dd8704
+--- /dev/null
++++ b/user/primes.c
+@@ -0,0 +1,85 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++// Khai báo 'noreturn' để tránh lỗi 'infinite recursion'
++void sieve(int) __attribute__((noreturn));
++
++void sieve(int left_pipe_read_end) {
++    int prime;
++    int n;
++
++    // 1. Đọc số nguyên tố đầu tiên
++    if (read(left_pipe_read_end, &prime, sizeof(int)) == 0) {
++        // 2. Trường hợp cơ sở: Không còn số, thoát
++        close(left_pipe_read_end);
++        exit(0);
++    }
++
++    // 3. In số nguyên tố
++    printf("prime %d\n", prime);
++
++    // 4. Tạo đường ống bên phải và quy trình con
++    int right_pipe[2];
++    pipe(right_pipe);
++
++    if (fork() == 0) {
++        // 5. --- Quy trình con (Tầng lọc N+1) ---
++        close(right_pipe[1]); // Con không cần ghi
++        close(left_pipe_read_end); // Con không cần đọc ống bên trái của cha
++
++        // Đệ quy
++        sieve(right_pipe[0]);
++
++        // Dọn dẹp
++        close(right_pipe[0]);
++        exit(0); // Sửa lỗi: Phải có tham số 0
++
++    } else {
++        // 6. --- Quy trình cha (Tầng lọc N) ---
++        close(right_pipe[0]); // Cha không cần đọc
++
++        // 7. Lọc và chuyển tiếp số
++        while (read(left_pipe_read_end, &n, sizeof(int)) > 0) {
++            if (n % prime != 0) {
++                write(right_pipe[1], &n, sizeof(int));
++            }
++        }
++
++        // 8. Dọn dẹp
++        close(left_pipe_read_end);
++        close(right_pipe[1]);
++
++        // 9. Đợi con hoàn thành
++        wait(0); 
++        exit(0); 
++    }
++}
++
++// Hàm main: Bắt đầu pipeline
++int main(int argc, char *argv[]) {
++    int p[2];
++    pipe(p);
++
++    if (fork() == 0) {
++        // --- Quy trình con (Tầng lọc đầu tiên) ---
++        close(p[1]); 
++        sieve(p[0]); 
++        close(p[0]);
++        exit(0); 
++    } else {
++        // --- Quy trình cha (Quy trình 'main') ---
++        close(p[0]); 
++
++        // 1. Bơm số 2-280 vào đường ống
++        for (int i = 2; i <= 280; i++) {
++            write(p[1], &i, sizeof(int));
++        }
++
++        // 2. Đóng đầu ghi
++        close(p[1]);
++
++        // 3. Đợi con hoàn thành
++        wait(0); 
++        exit(0); 
++    }
++}
+\ No newline at end of file
+diff --git a/user/secret.c b/user/secret.c
+new file mode 100644
+index 0000000..77378f4
+--- /dev/null
++++ b/user/secret.c
+@@ -0,0 +1,20 @@
++#include "kernel/types.h"
++#include "kernel/fcntl.h"
++#include "user/user.h"
++#include "kernel/riscv.h"
++
++
++int
++main(int argc, char *argv[])
++{
++  if(argc != 2){
++    printf("Usage: secret the-secret\n");
++    exit(1);
++  }
++  char *end = sbrk(PGSIZE*32);
++  end = end + 9 * PGSIZE;
++  strcpy(end, "my very very very secret pw is:   ");
++  strcpy(end+32, argv[1]);
++  exit(0);
++}
++
+diff --git a/user/sysinfotest.c b/user/sysinfotest.c
+new file mode 100644
+index 0000000..a92d10a
+--- /dev/null
++++ b/user/sysinfotest.c
+@@ -0,0 +1,153 @@
++#include "kernel/types.h"
++#include "kernel/riscv.h"
++#include "kernel/sysinfo.h"
++#include "user/user.h"
++
++
++void
++sinfo(struct sysinfo *info) {
++  if (sysinfo(info) < 0) {
++    printf("FAIL: sysinfo failed");
++    exit(1);
++  }
++}
++
++//
++// use sbrk() to count how many free physical memory pages there are.
++//
++int
++countfree()
++{
++  uint64 sz0 = (uint64)sbrk(0);
++  struct sysinfo info;
++  int n = 0;
++
++  while(1){
++    if((uint64)sbrk(PGSIZE) == 0xffffffffffffffff){
++      break;
++    }
++    n += PGSIZE;
++  }
++  sinfo(&info);
++  if (info.freemem != 0) {
++    printf("FAIL: there is no free mem, but sysinfo.freemem=%ld\n",
++      info.freemem);
++    exit(1);
++  }
++  sbrk(-((uint64)sbrk(0) - sz0));
++  return n;
++}
++
++void
++testmem() {
++  struct sysinfo info;
++  uint64 n = countfree();
++  
++  sinfo(&info);
++
++  if (info.freemem!= n) {
++    printf("FAIL: free mem %ld (bytes) instead of %ld\n", info.freemem, n);
++    exit(1);
++  }
++  
++  if((uint64)sbrk(PGSIZE) == 0xffffffffffffffff){
++    printf("sbrk failed");
++    exit(1);
++  }
++
++  sinfo(&info);
++    
++  if (info.freemem != n-PGSIZE) {
++    printf("FAIL: free mem %ld (bytes) instead of %ld\n", n-PGSIZE, info.freemem);
++    exit(1);
++  }
++  
++  if((uint64)sbrk(-PGSIZE) == 0xffffffffffffffff){
++    printf("sbrk failed");
++    exit(1);
++  }
++
++  sinfo(&info);
++    
++  if (info.freemem != n) {
++    printf("FAIL: free mem %ld (bytes) instead of %ld\n", n, info.freemem);
++    exit(1);
++  }
++}
++
++void
++testcall() {
++  struct sysinfo info;
++  
++  if (sysinfo(&info) < 0) {
++    printf("FAIL: sysinfo failed\n");
++    exit(1);
++  }
++
++  if (sysinfo((struct sysinfo *) 0xeaeb0b5b00002f5e) !=  0xffffffffffffffff) {
++    printf("FAIL: sysinfo succeeded with bad argument\n");
++    exit(1);
++  }
++}
++
++void testproc() {
++  struct sysinfo info;
++  uint64 nproc;
++  int status;
++  int pid;
++  
++  sinfo(&info);
++  nproc = info.nproc;
++
++  pid = fork();
++  if(pid < 0){
++    printf("sysinfotest: fork failed\n");
++    exit(1);
++  }
++  if(pid == 0){
++    sinfo(&info);
++    if(info.nproc != nproc+1) {
++      printf("sysinfotest: FAIL nproc is %ld instead of %ld\n", info.nproc, nproc+1);
++      exit(1);
++    }
++    exit(0);
++  }
++  wait(&status);
++  sinfo(&info);
++  if(info.nproc != nproc) {
++      printf("sysinfotest: FAIL nproc is %ld instead of %ld\n", info.nproc, nproc);
++      exit(1);
++  }
++}
++
++void testbad() {
++  int pid = fork();
++  int xstatus;
++  
++  if(pid < 0){
++    printf("sysinfotest: fork failed\n");
++    exit(1);
++  }
++  if(pid == 0){
++      sinfo(0x0);
++      exit(0);
++  }
++  wait(&xstatus);
++  if(xstatus == -1)  // kernel killed child?
++    exit(0);
++  else {
++    printf("sysinfotest: testbad succeeded %d\n", xstatus);
++    exit(xstatus);
++  }
++}
++
++int
++main(int argc, char *argv[])
++{
++  printf("sysinfotest: start\n");
++  testcall();
++  testmem();
++  testproc();
++  printf("sysinfotest: OK\n");
++  exit(0);
++}
+diff --git a/user/trace.c b/user/trace.c
+new file mode 100644
+index 0000000..474b26c
+--- /dev/null
++++ b/user/trace.c
+@@ -0,0 +1,29 @@
++#include "kernel/param.h"
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int
++main(int argc, char *argv[])
++{
++  int i;
++  char *nargv[MAXARG];
++
++  if(argc < 3 || (argv[1][0] < '0' || argv[1][0] > '9')){
++    fprintf(2, "Usage: %s mask command\n", argv[0]);
++    exit(1);
++  }
++
++  if (trace(atoi(argv[1])) < 0) {
++    fprintf(2, "%s: trace failed\n", argv[0]);
++    exit(1);
++  }
++  
++  for(i = 2; i < argc && i < MAXARG; i++){
++    nargv[i-2] = argv[i];
++  }
++  nargv[argc-2] = 0;
++  exec(nargv[0], nargv);
++  printf("trace: exec failed\n");
++  exit(0);
++}
+diff --git a/user/user.h b/user/user.h
+index f16fe27..d216a10 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -1,4 +1,5 @@
+ struct stat;
++struct sysinfo;
+ 
+ // system calls
+ int fork(void);
+@@ -22,6 +23,8 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int trace(int mask);
++int sysinfo(struct sysinfo *);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index 01e426e..353a1f8 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -36,3 +36,5 @@ entry("getpid");
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
++entry("trace");
++entry("sysinfo");
+\ No newline at end of file
+diff --git a/user/xargs.c b/user/xargs.c
+new file mode 100644
+index 0000000..8fe8a3e
+--- /dev/null
++++ b/user/xargs.c
+@@ -0,0 +1,77 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main(int argc, char *argv[])
++{
++  char buf[512];
++  char *args[32];
++  int n = 0;
++
++  // copy fixed args (program to run and its fixed args)
++  if (argc < 2) {
++    // nothing to run
++    exit(0);
++  }
++  for (int i = 1; i < argc; i++) {
++    args[n++] = argv[i];
++  }
++
++  while (1) {
++    int len = 0;
++    int r;
++    char c;
++
++    // read one line from stdin, char by char
++    while ((r = read(0, &c, 1)) == 1) {
++      if (c == '\n' || c == '\r') {
++        break;
++      }
++      if (len < (int)sizeof(buf) - 1) {
++        buf[len++] = c;
++      }
++      // else: truncate long line silently
++    }
++
++    if (r == 0 && len == 0) {
++      // EOF and no data -> done
++      break;
++    }
++
++    // terminate string
++    buf[len] = 0;
++
++    // if empty line (len==0) skip
++    if (len == 0) {
++      if (r == 0) break; // EOF after empty line
++      continue;
++    }
++
++    // prepare argv for exec: fixed args + this line
++    args[n] = buf;
++    args[n + 1] = 0;
++
++    int pid = fork();
++    if (pid < 0) {
++      // fork failed
++      fprintf(2, "xargs: fork failed\n");
++      break;
++    }
++    if (pid == 0) {
++      // child: execute
++      exec(args[0], args);
++      // if exec returns, error
++      fprintf(2, "xargs: exec %s failed\n", args[0]);
++      exit(1);
++    } else {
++      // parent: wait for child to finish
++      wait(0);
++    }
++
++    // if EOF was encountered (r == 0) then break loop
++    if (r == 0) break;
++    // otherwise continue to read next line (buf will be overwritten)
++  }
++
++  exit(0);
++}
